@@ -46,11 +46,8 @@ def terminate_process(process, worker_id):
     print(f"Worker {worker_id}: Process termination completed")
 
 def run_worker(command, worker_id, silent, no_inference_timeout):
-    if not silent:
-        print(f"Starting Worker {worker_id}")
-    else:
-        print(f"Worker {worker_id}: Started")
-
+    print(f"Starting Worker {worker_id} with command: {command}")
+    
     process = None
     last_inference_time = datetime.now()
     
