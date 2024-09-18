@@ -2,10 +2,7 @@ import argparse
 import subprocess
 import time
 import threading
-import re
 import signal
-import select
-import os
 import psutil
 from datetime import datetime, timedelta
 
@@ -15,17 +12,21 @@ def terminate_process(process, worker_id):
     if process is None:
         return
 
-    print(f"Worker {worker_id}: Forcefully terminating process...")
+    print(f"Worker {worker_id}: Terminating process...")
     try:
+        # Get the process and its children
         parent = psutil.Process(process.pid)
         children = parent.children(recursive=True)
-        
+
+        # Terminate children
         for child in children:
             child.terminate()
         parent.terminate()
 
+        # Wait for processes to terminate
         gone, alive = psutil.wait_procs(children + [parent], timeout=3)
-        
+
+        # Force kill any remaining processes
         for p in alive:
             print(f"Worker {worker_id}: Force killing process {p.pid}")
             p.kill()
@@ -34,69 +35,46 @@ def terminate_process(process, worker_id):
         print(f"Worker {worker_id}: Process already terminated")
     except Exception as e:
         print(f"Worker {worker_id}: Error while terminating process - {str(e)}")
-    
-    # Final check to ensure the process is no longer running
-    try:
-        os.kill(process.pid, 0)
-        print(f"Worker {worker_id}: Process still exists. Force killing...")
-        os.kill(process.pid, signal.SIGKILL)
-    except OSError:
-        pass
-    
+
     print(f"Worker {worker_id}: Process termination completed")
 
 def run_worker(command, worker_id, silent, no_inference_timeout):
-    print(f"Starting Worker {worker_id} with command: {command}")
-    
     process = None
     last_inference_time = datetime.now()
-    
+
     while not stop_flag.is_set():
         if process is None or process.poll() is not None:
             if process is not None:
                 print(f"Worker {worker_id}: Restarting")
                 terminate_process(process, worker_id)
-            
+
             process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, universal_newlines=True)
             last_inference_time = datetime.now()
 
         try:
-            # Use select for non-blocking read with a timeout
-            ready, _, _ = select.select([process.stdout], [], [], 60.0)  # 60-second timeout
-            if ready:
-                line = process.stdout.readline()
-                if not line:
-                    continue
-
+            # Read output with a timeout
+            output = process.stdout.readline()
+            if output:
                 if not silent:
-                    print(f"Worker {worker_id}: {line.strip()}")
+                    print(f"Worker {worker_id}: {output.strip()}")
                 
-                if re.search(r'\[.*\]: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \d+ Inference finished from subscription instance\..*\.inference\.', line):
+                # Update last inference time if needed
+                if 'Inference finished' in output:
                     last_inference_time = datetime.now()
             else:
-                # No output for 60 seconds, check if process is still responsive
+                # Check if the process is unresponsive
                 if process.poll() is None:
-                    print(f"Worker {worker_id}: No output for 60 seconds. Checking process...")
-                    # Send a signal to the process to check if it's responsive
-                    process.send_signal(signal.SIGURG)
-                    time.sleep(1)
-                    if process.poll() is None:
-                        print(f"Worker {worker_id}: Process is still running but unresponsive. Restarting...")
+                    if datetime.now() - last_inference_time > timedelta(minutes=no_inference_timeout):
+                        print(f"Worker {worker_id}: No inference finished for {no_inference_timeout} minutes. Restarting...")
                         terminate_process(process, worker_id)
                         process = None
                         last_inference_time = datetime.now()
-                
-            if datetime.now() - last_inference_time > timedelta(minutes=no_inference_timeout):
-                print(f"Worker {worker_id}: No inference finished for {no_inference_timeout} minutes. Restarting...")
-                terminate_process(process, worker_id)
-                process = None
-                last_inference_time = datetime.now()
 
         except Exception as e:
             print(f"Worker {worker_id}: Error - {str(e)}. Restarting...")
             terminate_process(process, worker_id)
             process = None
-            time.sleep(5)  # Wait a bit before restarting to avoid rapid restarts in case of persistent errors
+            time.sleep(5)  # Wait before restarting
 
     if process:
         print(f"Worker {worker_id}: Stopping")
@@ -108,12 +86,11 @@ def signal_handler(signum, frame):
 
 def restart_all_workers(threads, command, silent, no_inference_timeout):
     print("Restarting all workers...")
-    stop_flag.set()  # Stop all current workers
+    stop_flag.set()  # Signal all workers to stop
     for thread in threads:
         thread.join()  # Wait for all workers to finish
     stop_flag.clear()
     
-    # Restart all workers
     new_threads = []
     for i in range(len(threads)):
         thread = threading.Thread(target=run_worker, args=(command, i, silent, no_inference_timeout))
