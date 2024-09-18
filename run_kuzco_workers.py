@@ -59,6 +59,7 @@ def run_worker(command, worker_id, silent, no_inference_timeout):
             if process is not None:
                 print(f"Worker {worker_id}: Restarting")
                 terminate_process(process, worker_id)
+            
             process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, universal_newlines=True)
             last_inference_time = datetime.now()
 
@@ -108,6 +109,22 @@ def signal_handler(signum, frame):
     print("\nCtrl+C pressed. Stopping all workers...")
     stop_flag.set()
 
+def restart_all_workers(threads, command, silent, no_inference_timeout):
+    print("Restarting all workers...")
+    stop_flag.set()  # Stop all current workers
+    for thread in threads:
+        thread.join()  # Wait for all workers to finish
+    stop_flag.clear()
+    
+    # Restart all workers
+    new_threads = []
+    for i in range(len(threads)):
+        thread = threading.Thread(target=run_worker, args=(command, i, silent, no_inference_timeout))
+        thread.start()
+        new_threads.append(thread)
+        time.sleep(1)  # 1-second pause between starting each worker
+    return new_threads
+
 def main():
     parser = argparse.ArgumentParser(description="Run Kuzco workers in parallel")
     parser.add_argument("command", help="Kuzco worker command to run")
@@ -128,11 +145,17 @@ def main():
         threads.append(thread)
         time.sleep(1)  # 1-second pause between starting each worker
 
-    for thread in threads:
-        thread.join()
-
-    if not args.silent:
-        print("All workers have finished")
+    try:
+        while True:
+            time.sleep(300)  # 5-minute interval
+            threads = restart_all_workers(threads, args.command, args.silent, args.no_inference_timeout)
+    except KeyboardInterrupt:
+        print("Stopping all workers...")
+        stop_flag.set()
+        for thread in threads:
+            thread.join()
+        if not args.silent:
+            print("All workers have finished")
 
 if __name__ == "__main__":
     main()
